@@ -1,0 +1,9 @@
+{
+  "id": "codex-bridge",
+  "name": "Codex Bridge",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Send selected text or full note to local Codex CLI and insert results back into Obsidian.",
+  "author": "Codex",
+  "isDesktopOnly": true
+}

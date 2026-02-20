@@ -1,0 +1,10 @@
+.DS_Store
+._*
+
+# Obsidian local runtime/cache
+.tmp-appserver/
+data.json
+
+# Logs
+*.log
+
