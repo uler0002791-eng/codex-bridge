@@ -1232,3 +1232,189 @@
 .codex-bridge-suggest-path {
   opacity: 0.7;
 }
+
+/* ── 滚动到底部按钮 ── */
+.codex-bridge-scroll-to-bottom {
+  display: none;
+  position: absolute;
+  bottom: 160px;
+  right: 18px;
+  z-index: 10;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  box-shadow: 0 2px 6px rgba(0,0,0,.18);
+  cursor: pointer;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+.codex-bridge-scroll-to-bottom.is-visible {
+  display: flex;
+  opacity: 1;
+}
+.codex-bridge-scroll-to-bottom:hover {
+  background: var(--background-modifier-hover);
+}
+
+/* ── 复制按钮 SVG 样式 ── */
+.codex-bridge-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  font-size: 12px;
+  opacity: 0.5;
+  transition: opacity 0.15s;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  color: var(--text-muted);
+}
+.codex-bridge-copy-btn:hover,
+.codex-bridge-msg:hover .codex-bridge-copy-btn {
+  opacity: 1;
+  color: var(--text-normal);
+}
+.codex-bridge-copy-btn.is-copied {
+  opacity: 1;
+  color: var(--color-green);
+}
+
+/* ── 删除消息按钮 ── */
+.codex-bridge-del-msg-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 4px;
+  border: none;
+  background: transparent;
+  border-radius: 4px;
+  font-size: 12px;
+  opacity: 0;
+  transition: opacity 0.15s, color 0.15s;
+  cursor: pointer;
+  color: var(--text-muted);
+}
+.codex-bridge-del-msg-btn:hover,
+.codex-bridge-msg:hover .codex-bridge-del-msg-btn {
+  opacity: 1;
+  color: var(--text-error);
+}
+
+/* ── 代码块增强：语言标签 + 一键复制 ── */
+.codex-bridge-code-wrapper {
+  position: relative;
+}
+.codex-bridge-code-lang {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  font-size: 11px;
+  font-family: var(--font-monospace);
+  color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
+  padding: 1px 4px;
+  border-radius: 3px;
+  transition: background 0.15s, color 0.15s;
+}
+.codex-bridge-code-lang:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+/* ── 输入框自动增高 ── */
+.codex-bridge-chat-input {
+  resize: none;
+  overflow-y: auto;
+  min-height: 36px;
+  transition: min-height 0.1s;
+}
+
+/* ── 会话历史搜索框 ── */
+.codex-bridge-history-search-wrap {
+  padding: 6px 8px 4px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+.codex-bridge-history-search {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 4px 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-primary);
+  color: var(--text-normal);
+  font-size: 13px;
+  outline: none;
+}
+.codex-bridge-history-search:focus {
+  border-color: var(--interactive-accent);
+}
+.codex-bridge-history-list {
+  overflow-y: auto;
+  max-height: 280px;
+}
+
+/* ── MCP 服务器列表（设置页） ── */
+.codex-bridge-mcp-list {
+  margin-bottom: 8px;
+}
+.codex-bridge-mcp-empty {
+  color: var(--text-muted);
+  font-size: 13px;
+  margin: 4px 0 8px;
+}
+.codex-bridge-mcp-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--background-modifier-border);
+  gap: 8px;
+}
+.codex-bridge-mcp-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.codex-bridge-mcp-name {
+  font-weight: 600;
+  font-size: 13px;
+}
+.codex-bridge-mcp-detail {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 280px;
+}
+.codex-bridge-mcp-btns {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.codex-bridge-mcp-btn {
+  padding: 2px 10px;
+  border-radius: 4px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  color: var(--text-normal);
+}
+.codex-bridge-mcp-btn:hover {
+  background: var(--background-modifier-hover);
+}
+.codex-bridge-mcp-btn.is-danger {
+  color: var(--text-error);
+  border-color: var(--text-error);
+}
+.codex-bridge-mcp-btn.is-danger:hover {
+  background: var(--background-modifier-error);
+}

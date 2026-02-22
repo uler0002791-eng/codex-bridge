@@ -35,6 +35,12 @@ const MAX_FOLDER_REF_FILE_CHARS = 3000;
 const MAX_SKILLS_PER_SESSION = 8;
 const MAX_SKILL_SNIPPET_CHARS = 2400;
 const SKILL_CACHE_TTL_MS = 10000;
+const TEXTAREA_MIN_MAX_HEIGHT = 120; // 输入框自动增高最小上限（px）
+const TEXTAREA_MAX_HEIGHT_PERCENT = 0.5; // 输入框最多占容器高度的 50%
+const SCROLL_TO_BOTTOM_THRESHOLD = 80; // 距底部多少 px 内视为"接近底部"
+const MAX_STDOUT_BUFFER = 10 * 1024 * 1024; // 10 MB – 防止 stdoutBuffer 无限增长导致内存泄漏
+const MAX_STDERR_BUFFER = 2 * 1024 * 1024;  // 2 MB
+const TURN_TIMEOUT_MS = 300000;              // 5 分钟（原先硬编码 120 秒）
 const LEGACY_MODEL_OPTIONS = "gpt-5,gpt-5-mini,gpt-4.1";
 const RECOMMENDED_MODEL_OPTIONS = "gpt-5.2-codex,gpt-5.3-codex,gpt-5.1-codex-max,gpt-5.2,gpt-5.1-codex-mini";
 
@@ -56,7 +62,8 @@ const DEFAULT_SETTINGS = {
     "你是 Obsidian 中的 AI 助手。默认使用中文回答，直接回答问题，不要只反问用户。若用户提到“这个文档/本文/这篇”，默认指当前打开文档并直接基于文档内容完成任务。",
   includeNoteContextInChat: true,
   sendShortcut: "enter",
-  show1MContext: false
+  show1MContext: false,
+  mcpServers: []   // [{ name, type: "stdio"|"http", command, url, env }]
 };
 
 class InstructionModal extends Modal {
@@ -177,6 +184,7 @@ class CodexChatView extends ItemView {
     this.sessionMetaEl = null;
     this.historyMenuEl = null;
     this.historyMenuOpen = false;
+    this.historySearchQuery = "";
     this.moreMenuEl = null;
     this.moreMenuOpen = false;
     this.mentionMenuEl = null;
@@ -216,6 +224,7 @@ class CodexChatView extends ItemView {
     this.contextMeterTextEl = null;
     this.contextMeterState = null;
     this.selectionTicker = null;
+    this.messagesScrollBtn = null;
     this.isImeComposing = false;
     this.lastCompositionEndAt = 0;
   }
@@ -254,7 +263,7 @@ class CodexChatView extends ItemView {
     );
     this.selectionTicker = window.setInterval(() => {
       this.updateSelectionLabel();
-    }, 350);
+    }, 1000); // 从 350ms 改为 1000ms，减少约 65% 的轮询 CPU 开销
     this.loadAvailableSkills().catch(() => {});
   }
 
@@ -283,6 +292,21 @@ class CodexChatView extends ItemView {
     this.sessionMetaEl = metaRow.createDiv({ cls: "codex-bridge-session-meta" });
 
     this.messagesEl = wrapper.createDiv({ cls: "codex-bridge-chat-messages" });
+
+    // 滚动到底部按钮：只在用户向上滚动时显示
+    this.messagesScrollBtn = wrapper.createEl("button", {
+      cls: "codex-bridge-scroll-to-bottom",
+      attr: { type: "button", "aria-label": "滚动到底部" }
+    });
+    safeSetIcon(this.messagesScrollBtn, "chevrons-down", "↓");
+    this.messagesScrollBtn.addEventListener("click", () => {
+      this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
+    });
+    this.messagesEl.addEventListener("scroll", () => {
+      const { scrollTop, scrollHeight, clientHeight } = this.messagesEl;
+      const nearBottom = scrollHeight - scrollTop - clientHeight < SCROLL_TO_BOTTOM_THRESHOLD;
+      this.messagesScrollBtn.toggleClass("is-visible", !nearBottom);
+    });
 
     const dock = wrapper.createDiv({ cls: "codex-bridge-chat-dock" });
     this.sessionListEl = dock.createDiv({ cls: "codex-bridge-session-strip" });
@@ -447,7 +471,7 @@ class CodexChatView extends ItemView {
     });
     this.inputEl = this.inputFrameEl.createEl("textarea", { cls: "codex-bridge-chat-input" });
     this.updateInputPlaceholder();
-    this.inputEl.rows = 4;
+    this.inputEl.rows = 1;
     this.imagePreviewEl = this.inputFrameEl.createDiv({ cls: "codex-bridge-image-preview-wrap" });
     this.imagePickerEl = this.inputFrameEl.createEl("input", { cls: "codex-bridge-image-picker" });
     this.imagePickerEl.type = "file";
@@ -545,6 +569,7 @@ class CodexChatView extends ItemView {
       this.updateMentionSuggestions();
       this.updateSkillSuggestionsFromInput();
       this.updateInputActionButton();
+      this.autoResizeTextarea();
     });
     this.inputEl.addEventListener("click", () => {
       this.updateMentionSuggestions();
@@ -782,7 +807,8 @@ class CodexChatView extends ItemView {
       if (!file) {
         continue;
       }
-      let imagePath = typeof file.path === "string" ? file.path : "";
+      const hadOriginalPath = typeof file.path === "string" && file.path.length > 0;
+      let imagePath = hadOriginalPath ? file.path : "";
       const name = file.name || path.basename(imagePath || "") || `image-${Date.now()}.png`;
       if (!imagePath) {
         try {
@@ -794,6 +820,7 @@ class CodexChatView extends ItemView {
           );
           fs.writeFileSync(imagePath, Buffer.from(ab));
         } catch (error) {
+          new Notice(`图片添加失败: ${file.name || "未知文件"}`);
           continue;
         }
       }
@@ -813,7 +840,8 @@ class CodexChatView extends ItemView {
         id: newId(),
         path: imagePath,
         name,
-        previewUrl
+        previewUrl,
+        isTemp: !hadOriginalPath // 标记粘贴产生的临时文件，用于 close 时清理
       });
     }
     this.renderImagePreviews();
@@ -823,10 +851,13 @@ class CodexChatView extends ItemView {
   removeImageAttachment(id) {
     const hit = this.selectedImages.find((img) => img.id === id);
     this.selectedImages = this.selectedImages.filter((img) => img.id !== id);
-    if (hit && hit.previewUrl) {
-      try {
-        URL.revokeObjectURL(hit.previewUrl);
-      } catch (error) {
+    if (hit) {
+      if (hit.previewUrl) {
+        try { URL.revokeObjectURL(hit.previewUrl); } catch (e) {}
+      }
+      // 删除粘贴产生的临时文件，释放磁盘空间
+      if (hit.isTemp && hit.path) {
+        try { fs.unlinkSync(hit.path); } catch (e) {}
       }
     }
     this.renderImagePreviews();
@@ -836,10 +867,11 @@ class CodexChatView extends ItemView {
   clearImageAttachments() {
     for (const img of this.selectedImages) {
       if (img && img.previewUrl) {
-        try {
-          URL.revokeObjectURL(img.previewUrl);
-        } catch (error) {
-        }
+        try { URL.revokeObjectURL(img.previewUrl); } catch (e) {}
+      }
+      // 删除粘贴产生的临时文件
+      if (img && img.isTemp && img.path) {
+        try { fs.unlinkSync(img.path); } catch (e) {}
       }
     }
     this.selectedImages = [];
@@ -1571,37 +1603,71 @@ class CodexChatView extends ItemView {
       return;
     }
 
-    const sessions = this.plugin.chatSessions;
-    if (!sessions.length) {
-      this.historyMenuEl.createDiv({ cls: "codex-bridge-history-empty", text: "暂无会话" });
-      return;
-    }
-
-    for (const session of sessions) {
-      const row = this.historyMenuEl.createDiv({
-        cls: `codex-bridge-history-item ${
-          session.id === this.plugin.activeSessionId ? "is-active" : ""
-        }`
-      });
-      const titleBtn = row.createEl("button", {
-        cls: "codex-bridge-history-item-main"
-      });
-
-      const title = session.title || "新对话";
-      const preview = this.getSessionPreview(session);
-      const timeText = this.formatSessionTime(session.updatedAt);
-      titleBtn.createEl("div", { cls: "codex-bridge-history-item-title", text: title });
-      titleBtn.createEl("div", {
-        cls: "codex-bridge-history-item-preview",
-        text: preview ? `${preview} · ${timeText}` : timeText
-      });
-      titleBtn.addEventListener("click", async () => {
-        this.plugin.activeSessionId = session.id;
-        await this.plugin.persist();
+    // 搜索框
+    const searchWrap = this.historyMenuEl.createDiv({ cls: "codex-bridge-history-search-wrap" });
+    const searchInput = searchWrap.createEl("input", { cls: "codex-bridge-history-search" });
+    searchInput.type = "search";
+    searchInput.placeholder = "搜索会话…";
+    searchInput.value = this.historySearchQuery;
+    searchInput.addEventListener("input", () => {
+      this.historySearchQuery = searchInput.value;
+      renderList();
+    });
+    searchInput.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") {
+        this.historySearchQuery = "";
         this.historyMenuOpen = false;
-        this.refresh();
-      });
-    }
+        this.renderHistoryMenu();
+      }
+    });
+
+    const listEl = this.historyMenuEl.createDiv({ cls: "codex-bridge-history-list" });
+
+    const renderList = () => {
+      listEl.empty();
+      const all = this.plugin.chatSessions;
+      const q = this.historySearchQuery.trim().toLowerCase();
+      const sessions = q
+        ? all.filter((s) => {
+            const title = (s.title || "新对话").toLowerCase();
+            const preview = this.getSessionPreview(s).toLowerCase();
+            return title.includes(q) || preview.includes(q);
+          })
+        : all;
+
+      if (!sessions.length) {
+        listEl.createDiv({ cls: "codex-bridge-history-empty", text: q ? "无匹配会话" : "暂无会话" });
+        return;
+      }
+
+      for (const session of sessions) {
+        const row = listEl.createDiv({
+          cls: `codex-bridge-history-item ${
+            session.id === this.plugin.activeSessionId ? "is-active" : ""
+          }`
+        });
+        const titleBtn = row.createEl("button", { cls: "codex-bridge-history-item-main" });
+        const title = session.title || "新对话";
+        const preview = this.getSessionPreview(session);
+        const timeText = this.formatSessionTime(session.updatedAt);
+        titleBtn.createEl("div", { cls: "codex-bridge-history-item-title", text: title });
+        titleBtn.createEl("div", {
+          cls: "codex-bridge-history-item-preview",
+          text: preview ? `${preview} · ${timeText}` : timeText
+        });
+        titleBtn.addEventListener("click", async () => {
+          this.plugin.activeSessionId = session.id;
+          await this.plugin.persist();
+          this.historyMenuOpen = false;
+          this.historySearchQuery = "";
+          this.refresh();
+        });
+      }
+    };
+
+    renderList();
+    // 自动聚焦搜索框
+    setTimeout(() => searchInput.focus(), 30);
   }
 
   renderMoreMenu() {
@@ -1677,15 +1743,17 @@ class CodexChatView extends ItemView {
 
     const body = item.createDiv({ cls: "codex-bridge-msg-body" });
 
-    const renderAssistantAnswer = (container, text) => {
+    const renderAssistantAnswer = (container, text, enhance = false) => {
       if (MarkdownRenderer && typeof MarkdownRenderer.render === "function") {
         container.empty();
         container.addClass("markdown-rendered");
         const sourcePath = this.plugin.getActiveNoteContext().path || "";
-        MarkdownRenderer.render(this.app, text || "", container, sourcePath, this.plugin).catch(() => {
-          container.empty();
-          container.setText(text || "");
-        });
+        MarkdownRenderer.render(this.app, text || "", container, sourcePath, this.plugin)
+          .then(() => { if (enhance) addCodeBlockEnhancements(container); })
+          .catch(() => {
+            container.empty();
+            container.setText(text || "");
+          });
       } else {
         container.setText(text || "");
       }
@@ -1722,38 +1790,59 @@ class CodexChatView extends ItemView {
     if (role === "assistant") {
       ensureThoughtBlock();
       answerEl = body.createDiv({ cls: "codex-bridge-answer" });
-      renderAssistantAnswer(answerEl, content || "");
+      renderAssistantAnswer(answerEl, content || "", true); // enhance=true：渲染后加代码块增强
     } else {
       body.setText(content || "");
     }
 
+    // 消息操作按钮区（助手消息：复制 + 删除；用户消息：删除）
+    const actions = item.createDiv({ cls: "codex-bridge-msg-actions" });
+
     if (role === "assistant") {
-      const actions = item.createDiv({ cls: "codex-bridge-msg-actions" });
-      const copyBtn = actions.createEl("button", { text: "复制" });
-      copyBtn.addEventListener("click", async () => {
-        const textToCopy =
-          (answerEl && answerEl.innerText ? answerEl.innerText : "") || (content || "");
-        if (!textToCopy.trim()) {
-          new Notice("无可复制内容");
-          return;
-        }
+      const copyBtn = actions.createEl("button", { cls: "codex-bridge-copy-btn" });
+      copyBtn.setAttribute("aria-label", "复制回复");
+      copyBtn.title = "复制";
+      copyBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>`;
+      let copyFeedbackTimer = null;
+      copyBtn.addEventListener("click", async (event) => {
+        event.stopPropagation();
+        const textToCopy = (answerEl && answerEl.innerText ? answerEl.innerText : "") || (content || "");
+        if (!textToCopy.trim()) return;
         try {
-          if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
-            await navigator.clipboard.writeText(textToCopy);
-          } else {
-            const ta = document.createElement("textarea");
-            ta.value = textToCopy;
-            document.body.appendChild(ta);
-            ta.select();
-            document.execCommand("copy");
-            ta.remove();
-          }
-          new Notice("已复制到剪切板");
+          await navigator.clipboard.writeText(textToCopy);
         } catch (error) {
           new Notice("复制失败");
+          return;
         }
+        if (copyFeedbackTimer) clearTimeout(copyFeedbackTimer);
+        copyBtn.setText("已复制！");
+        copyBtn.addClass("is-copied");
+        copyFeedbackTimer = setTimeout(() => {
+          copyBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>`;
+          copyBtn.removeClass("is-copied");
+          copyFeedbackTimer = null;
+        }, 1500);
       });
     }
+
+    // 删除消息按钮（所有消息类型均有）
+    const delBtn = actions.createEl("button", { cls: "codex-bridge-del-msg-btn" });
+    delBtn.setAttribute("aria-label", "删除此消息");
+    delBtn.title = "删除";
+    delBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path><path d="M10 11v6"></path><path d="M14 11v6"></path><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"></path></svg>`;
+    delBtn.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      const session = this.plugin.getActiveSession();
+      if (!session) return;
+      const allItems = Array.from(this.messagesEl.querySelectorAll(":scope > .codex-bridge-msg"));
+      const idx = allItems.indexOf(item);
+      if (idx < 0 || idx >= session.messages.length) return;
+      session.messages.splice(idx, 1);
+      session.updatedAt = Date.now();
+      item.remove();
+      this.updateCurrentNoteLabel();
+      await this.plugin.persist();
+    });
 
     this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
     if (role === "assistant" && messageMeta.live === true) {
@@ -1786,7 +1875,7 @@ class CodexChatView extends ItemView {
             }
           }
           if (this.messagesEl) {
-            this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
+            this.scrollToBottomIfNeeded();
           }
         }
       };
@@ -2047,6 +2136,166 @@ class CodexChatView extends ItemView {
     }
   }
 
+  /**
+   * 输入框自动增高：内容增多时自动撑开，最多占容器高度的 50%。
+   */
+  autoResizeTextarea() {
+    if (!this.inputEl) return;
+    this.inputEl.style.minHeight = "";
+    const container = this.inputEl.closest(".codex-bridge-chat-root");
+    const viewHeight = container ? container.clientHeight : window.innerHeight;
+    const maxHeight = Math.max(TEXTAREA_MIN_MAX_HEIGHT, viewHeight * TEXTAREA_MAX_HEIGHT_PERCENT);
+    const contentHeight = Math.min(this.inputEl.scrollHeight, maxHeight);
+    if (contentHeight > this.inputEl.offsetHeight) {
+      this.inputEl.style.minHeight = `${contentHeight}px`;
+    }
+    this.inputEl.style.maxHeight = `${maxHeight}px`;
+    this.updateInputOverlayLayout();
+  }
+
+  /**
+   * 智能滚动：只在用户已接近底部时才自动跟随，不打断手动往上翻阅。
+   */
+  scrollToBottomIfNeeded() {
+    if (!this.messagesEl) return;
+    const { scrollTop, scrollHeight, clientHeight } = this.messagesEl;
+    const nearBottom = scrollHeight - scrollTop - clientHeight < SCROLL_TO_BOTTOM_THRESHOLD;
+    if (nearBottom) {
+      requestAnimationFrame(() => {
+        if (this.messagesEl) this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
+      });
+    }
+  }
+
+}
+
+// ── MCP 服务器添加/编辑弹窗 ──
+class McpServerModal extends Modal {
+  constructor(app, plugin, existing, onSave) {
+    super(app);
+    this.plugin = plugin;
+    this.existing = existing || null; // 编辑模式传入已有条目
+    this.onSave = onSave;
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h3", { text: this.existing ? "编辑 MCP 服务器" : "添加 MCP 服务器" });
+
+    let name = this.existing ? this.existing.name : "";
+    let type = this.existing ? this.existing.type : "stdio";
+    let command = this.existing ? (this.existing.command || "") : "";
+    let url = this.existing ? (this.existing.url || "") : "";
+    let env = this.existing ? (this.existing.env || "") : "";
+
+    new Setting(contentEl)
+      .setName("名称")
+      .setDesc("唯一标识符，仅限字母/数字/连字符")
+      .addText((t) => t.setValue(name).setPlaceholder("my-tool").onChange((v) => (name = v.trim())));
+
+    let commandSetting, urlSetting;
+
+    const typeToggle = new Setting(contentEl)
+      .setName("类型")
+      .setDesc("stdio：本地命令；http：远程 HTTP 服务器")
+      .addDropdown((d) =>
+        d
+          .addOption("stdio", "stdio（本地命令）")
+          .addOption("http", "http（远程 URL）")
+          .setValue(type)
+          .onChange((v) => {
+            type = v;
+            commandSetting.settingEl.toggle(type === "stdio");
+            urlSetting.settingEl.toggle(type === "http");
+          })
+      );
+
+    commandSetting = new Setting(contentEl)
+      .setName("启动命令")
+      .setDesc("例：npx -y @modelcontextprotocol/server-filesystem /path/to/dir")
+      .addText((t) => t.setValue(command).setPlaceholder("npx -y mcp-server ...").onChange((v) => (command = v)));
+
+    urlSetting = new Setting(contentEl)
+      .setName("服务器 URL")
+      .setDesc("例：https://my-mcp.example.com/mcp")
+      .addText((t) => t.setValue(url).setPlaceholder("https://...").onChange((v) => (url = v.trim())));
+
+    // 初始显示正确的字段
+    commandSetting.settingEl.toggle(type === "stdio");
+    urlSetting.settingEl.toggle(type === "http");
+
+    new Setting(contentEl)
+      .setName("环境变量（可选）")
+      .setDesc("每行一个，格式 KEY=VALUE")
+      .addTextArea((t) => t.setValue(env).setPlaceholder("API_KEY=xxx").onChange((v) => (env = v)));
+
+    const footer = contentEl.createDiv({ cls: "codex-bridge-modal-footer" });
+    const saveBtn = footer.createEl("button", { text: "保存", cls: "mod-cta" });
+    const cancelBtn = footer.createEl("button", { text: "取消" });
+
+    cancelBtn.addEventListener("click", () => this.close());
+    saveBtn.addEventListener("click", async () => {
+      if (!name) { new Notice("请填写名称"); return; }
+      if (type === "stdio" && !command) { new Notice("请填写启动命令"); return; }
+      if (type === "http" && !url) { new Notice("请填写 URL"); return; }
+
+      // 调用 codex mcp add 注册到 Codex CLI
+      const codexCmd = this.plugin.settings.codexCommand || "codex";
+      const args = ["mcp", "add"];
+      // 如果是编辑已有条目，先删除旧的
+      if (this.existing) {
+        await new Promise((resolve) => {
+          execFile(codexCmd, ["mcp", "remove", this.existing.name], (err) => resolve());
+        });
+      }
+      if (type === "http") {
+        args.push(name, "--url", url);
+      } else {
+        args.push(name, "--");
+        args.push(...command.trim().split(/\s+/));
+      }
+      // 追加环境变量
+      if (env.trim()) {
+        for (const line of env.trim().split(/\n/)) {
+          const kv = line.trim();
+          if (kv) args.push("--env", kv);
+        }
+      }
+
+      let errMsg = "";
+      await new Promise((resolve) => {
+        execFile(codexCmd, args, (err, stdout, stderr) => {
+          if (err) errMsg = stderr || err.message || String(err);
+          resolve();
+        });
+      });
+
+      if (errMsg) {
+        new Notice(`MCP 添加失败：${errMsg.slice(0, 120)}`);
+        return;
+      }
+
+      // 更新插件设置里的记录
+      const servers = Array.isArray(this.plugin.settings.mcpServers) ? this.plugin.settings.mcpServers : [];
+      const entry = { name, type, command: type === "stdio" ? command : "", url: type === "http" ? url : "", env };
+      if (this.existing) {
+        const idx = servers.findIndex((s) => s.name === this.existing.name);
+        if (idx >= 0) servers[idx] = entry; else servers.push(entry);
+      } else {
+        servers.push(entry);
+      }
+      this.plugin.settings.mcpServers = servers;
+      await this.plugin.persist();
+      new Notice(`MCP 服务器 "${name}" 已${this.existing ? "更新" : "添加"}`);
+      this.close();
+      if (this.onSave) this.onSave();
+    });
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
 }
 
 class CodexBridgeSettingTab extends PluginSettingTab {
@@ -2222,6 +2471,65 @@ class CodexBridgeSettingTab extends PluginSettingTab {
             this.plugin.settings.promptTemplate = value;
             await this.plugin.persist();
           })
+      );
+
+    // ── MCP 服务器管理 ──
+    containerEl.createEl("h3", { text: "MCP 服务器" });
+    containerEl.createEl("p", {
+      text: "通过 Codex CLI 的 MCP 集成，连接外部工具服务器（文件系统、数据库、Web API 等）。配置后 Codex 可在对话中自动调用这些工具。",
+      cls: "setting-item-description"
+    });
+
+    const mcpListEl = containerEl.createDiv({ cls: "codex-bridge-mcp-list" });
+    const renderMcpList = () => {
+      mcpListEl.empty();
+      const servers = Array.isArray(this.plugin.settings.mcpServers) ? this.plugin.settings.mcpServers : [];
+      if (!servers.length) {
+        mcpListEl.createEl("p", {
+          text: "尚未配置任何 MCP 服务器。",
+          cls: "codex-bridge-mcp-empty"
+        });
+        return;
+      }
+      for (const server of servers) {
+        const row = mcpListEl.createDiv({ cls: "codex-bridge-mcp-row" });
+        const info = row.createDiv({ cls: "codex-bridge-mcp-info" });
+        info.createEl("span", { cls: "codex-bridge-mcp-name", text: server.name });
+        info.createEl("span", {
+          cls: "codex-bridge-mcp-detail",
+          text: server.type === "http" ? `HTTP · ${server.url}` : `stdio · ${server.command}`
+        });
+        const btns = row.createDiv({ cls: "codex-bridge-mcp-btns" });
+        const editBtn = btns.createEl("button", { text: "编辑", cls: "codex-bridge-mcp-btn" });
+        editBtn.addEventListener("click", () => {
+          new McpServerModal(this.app, this.plugin, server, () => {
+            this.display();
+          }).open();
+        });
+        const removeBtn = btns.createEl("button", { text: "删除", cls: "codex-bridge-mcp-btn is-danger" });
+        removeBtn.addEventListener("click", async () => {
+          const codexCmd = this.plugin.settings.codexCommand || "codex";
+          execFile(codexCmd, ["mcp", "remove", server.name], () => {});
+          this.plugin.settings.mcpServers = (this.plugin.settings.mcpServers || []).filter(
+            (s) => s.name !== server.name
+          );
+          await this.plugin.persist();
+          new Notice(`MCP 服务器 "${server.name}" 已删除`);
+          renderMcpList();
+        });
+      }
+    };
+    renderMcpList();
+
+    new Setting(containerEl)
+      .setName("添加 MCP 服务器")
+      .setDesc("支持 stdio（本地命令）和 HTTP 两种类型。")
+      .addButton((btn) =>
+        btn.setButtonText("+ 添加服务器").onClick(() => {
+          new McpServerModal(this.app, this.plugin, null, () => {
+            this.display();
+          }).open();
+        })
       );
   }
 }
@@ -3365,6 +3673,9 @@ module.exports = class CodexBridgePlugin extends Plugin {
   }
 
   runCodexViaAppServer(prompt, session, onProgress, imagePaths) {
+    if (!validateExecutablePath(this.settings.codexCommand)) {
+      return Promise.reject(new Error(`无效的 Codex 命令路径: "${this.settings.codexCommand}"，请在设置中检查`));
+    }
     const cwd = this.app.vault.adapter.basePath;
     const model = this.getSelectedModel() || pickModelFromArgs(splitArgs(this.settings.codexArgs)) || "gpt-5";
     const isAgent = this.isAgentMode();
@@ -3435,7 +3746,9 @@ module.exports = class CodexBridgePlugin extends Plugin {
       };
 
       child.stderr.on("data", (chunk) => {
-        stderr += String(chunk || "");
+        if (stderr.length < MAX_STDERR_BUFFER) {
+          stderr += String(chunk || "");
+        }
       });
 
       child.on("error", (error) => {
@@ -3455,6 +3768,10 @@ module.exports = class CodexBridgePlugin extends Plugin {
 
       child.stdout.on("data", (chunk) => {
         stdoutBuffer += String(chunk || "");
+        if (stdoutBuffer.length > MAX_STDOUT_BUFFER) {
+          fail(new Error("Codex 输出超出 10MB 上限，已中断，请检查是否有异常输出"));
+          return;
+        }
         let idx = stdoutBuffer.indexOf("\n");
         while (idx >= 0) {
           const line = stdoutBuffer.slice(0, idx).trim();
@@ -3466,7 +3783,8 @@ module.exports = class CodexBridgePlugin extends Plugin {
                 const task = pending.get(msg.id);
                 pending.delete(msg.id);
                 if (msg.error) {
-                  task.rej(new Error(msg.error.message || "JSON-RPC error"));
+                  const code = msg.error.code != null ? ` [code: ${msg.error.code}]` : "";
+                  task.rej(new Error(`${msg.error.message || "JSON-RPC error"}${code}`));
                 } else {
                   task.res(msg.result);
                 }
@@ -3624,8 +3942,8 @@ module.exports = class CodexBridgePlugin extends Plugin {
         const completedTurn = await new Promise((res, rej) => {
           const timer = setTimeout(() => {
             turnDone = null;
-            rej(new Error("turn timeout"));
-          }, 120000);
+            rej(new Error(`模型响应超时（>${TURN_TIMEOUT_MS / 60000} 分钟），请重试`));
+          }, TURN_TIMEOUT_MS);
           turnDone = {
             resolve: (t) => {
               clearTimeout(timer);
@@ -3667,6 +3985,9 @@ module.exports = class CodexBridgePlugin extends Plugin {
   }
 
   runCodexExec(prompt, session, onProgress, imagePaths) {
+    if (!validateExecutablePath(this.settings.codexCommand)) {
+      return Promise.reject(new Error(`无效的 Codex 命令路径: "${this.settings.codexCommand}"，请在设置中检查`));
+    }
     if (onProgress) {
       onProgress({ type: "status", text: "使用兼容模式执行中..." });
     }
@@ -3754,7 +4075,9 @@ module.exports = class CodexBridgePlugin extends Plugin {
 
       let stderr = "";
       child.stderr.on("data", (chunk) => {
-        stderr += String(chunk || "");
+        if (stderr.length < MAX_STDERR_BUFFER) {
+          stderr += String(chunk || "");
+        }
       });
 
       child.on("error", (error) => {
@@ -3839,6 +4162,55 @@ function isInterruptedError(error) {
   }
   const message = typeof error.message === "string" ? error.message : "";
   return message.includes("已中断");
+}
+
+/**
+ * 让代码块显示语言标签，点击语言标签可一键复制代码。
+ * 在 MarkdownRenderer.render() 完成后调用，仅处理非流式的最终消息。
+ */
+function addCodeBlockEnhancements(container) {
+  container.querySelectorAll("pre").forEach((pre) => {
+    if (pre.parentElement && pre.parentElement.classList.contains("codex-bridge-code-wrapper")) {
+      return; // 已经处理过，跳过
+    }
+    const wrapper = document.createElement("div");
+    wrapper.className = "codex-bridge-code-wrapper";
+    pre.parentElement.insertBefore(wrapper, pre);
+    wrapper.appendChild(pre);
+
+    const code = pre.querySelector('code[class*="language-"]');
+    if (code) {
+      const match = code.className.match(/language-(\w+)/);
+      if (match) {
+        wrapper.classList.add("has-language");
+        const label = document.createElement("span");
+        label.className = "codex-bridge-code-lang";
+        label.textContent = match[1];
+        label.title = "点击复制代码";
+        wrapper.appendChild(label);
+        label.addEventListener("click", async () => {
+          try {
+            await navigator.clipboard.writeText(code.textContent || "");
+            label.textContent = "copied!";
+            setTimeout(() => { label.textContent = match[1]; }, 1500);
+          } catch (e) {}
+        });
+      }
+    }
+  });
+}
+
+/**
+ * 校验 codexCommand 路径，防止 shell 元字符注入。
+ * 允许简单命令名（"codex"）和绝对路径（"/usr/local/bin/codex"），
+ * 拒绝包含 ; & | ` $ < > ( ) 等 shell 特殊字符的字符串。
+ */
+function validateExecutablePath(cmd) {
+  if (!cmd || typeof cmd !== "string") return false;
+  const trimmed = cmd.trim();
+  if (!trimmed) return false;
+  if (/[;&|`$<>()\[\]{}!#]/.test(trimmed)) return false;
+  return true;
 }
 
 function safeSetIcon(el, iconName, fallbackText) {
@@ -4418,8 +4790,10 @@ function estimateTextTokens(text) {
   if (!raw) {
     return 0;
   }
-  const bytes = Buffer.byteLength(raw, "utf8");
-  return Math.max(1, Math.ceil(bytes / 3));
+  // CJK字符（中日韩）每字约 1 token；ASCII/拉丁约 4 字符 1 token；其余按字节/3 兜底
+  const cjkCount = (raw.match(/[\u3000-\u9fff\uac00-\ud7af\uf900-\ufaff]/g) || []).length;
+  const nonCjk = raw.length - cjkCount;
+  return Math.max(1, cjkCount + Math.ceil(nonCjk / 4));
 }
 
 function newId() {
