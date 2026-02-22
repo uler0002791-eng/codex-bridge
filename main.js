@@ -25,6 +25,10 @@ const MAX_SESSION_MESSAGES = 80;
 const MAX_CONTEXT_TEXT = 12000;
 const CONTEXT_WINDOW_STANDARD = 200000;
 const CONTEXT_WINDOW_1M = 1000000;
+const CONTEXT_COMPACT_SOFT_RATIO = 0.8;
+const CONTEXT_COMPACT_HARD_RATIO = 0.9;
+const CONTEXT_COMPACT_KEEP_RECENT_MESSAGES = 12;
+const MAX_COMPACT_SUMMARY_CHARS = 12000;
 const MAX_FOLDER_REF_FILES = 15;
 const MAX_FOLDER_REF_TOTAL_CHARS = 30000;
 const MAX_FOLDER_REF_FILE_CHARS = 3000;
@@ -208,6 +212,9 @@ class CodexChatView extends ItemView {
     this.imagePickerEl = null;
     this.imagePreviewEl = null;
     this.selectedImages = [];
+    this.contextMeterBtn = null;
+    this.contextMeterTextEl = null;
+    this.contextMeterState = null;
     this.selectionTicker = null;
     this.isImeComposing = false;
     this.lastCompositionEndAt = 0;
@@ -339,6 +346,34 @@ class CodexChatView extends ItemView {
     });
     this.historyMenuEl = dock.createDiv({ cls: "codex-bridge-history-menu" });
     this.moreMenuEl = moreWrap.createDiv({ cls: "codex-bridge-more-menu" });
+    this.contextMeterBtn = dockActions.createEl("button", { cls: "codex-bridge-context-meter" });
+    this.contextMeterBtn.type = "button";
+    this.contextMeterBtn.title = "Context usage";
+    this.contextMeterBtn.setAttr("aria-label", "Context usage");
+    this.contextMeterTextEl = this.contextMeterBtn.createDiv({ cls: "codex-bridge-context-meter-text", text: "0%" });
+    this.contextMeterBtn.addEventListener("click", async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const session = this.plugin.getActiveSession();
+      if (!session || this.isBusy) {
+        return;
+      }
+      this.contextMeterBtn.addClass("is-working");
+      try {
+        const compacted = await this.plugin.compactSessionContext(session, "manual");
+        if (compacted && compacted.performed) {
+          new Notice("已压缩会话上下文");
+          this.refresh();
+        } else {
+          new Notice("当前上下文占用较低，无需压缩");
+        }
+      } catch (error) {
+        new Notice("上下文压缩失败");
+      } finally {
+        this.contextMeterBtn.removeClass("is-working");
+        this.updateContextMeter();
+      }
+    });
     this.registerDomEvent(dock, "click", (event) => event.stopPropagation());
     this.registerDomEvent(moreWrap, "click", (event) => event.stopPropagation());
     this.registerDomEvent(document, "click", () => {
@@ -569,6 +604,7 @@ class CodexChatView extends ItemView {
     this.renderModeToggle();
     this.updateInputPlaceholder();
     this.updateInputActionButton();
+    this.updateContextMeter();
     this.renderImagePreviews();
     this.hideMentionSuggestions();
     this.updateInputOverlayLayout();
@@ -701,6 +737,41 @@ class CodexChatView extends ItemView {
     } else {
       this.inputActionBtn.setAttribute("disabled", "true");
     }
+    this.updateContextMeter();
+  }
+
+  updateContextMeter() {
+    if (!this.contextMeterBtn) {
+      return;
+    }
+    const session = this.plugin.getActiveSession();
+    const usage = this.plugin.estimateContextUsage(session, {
+      draftInput: this.inputEl && this.inputEl.value ? this.inputEl.value : "",
+      mentions: this.selectedMentions,
+      skills: this.selectedSkills,
+      imageCount: Array.isArray(this.selectedImages) ? this.selectedImages.length : 0
+    });
+    this.contextMeterState = usage;
+    const pct = Math.max(0, Math.min(100, Math.round(usage.ratio * 100)));
+    if (this.contextMeterTextEl) {
+      this.contextMeterTextEl.setText(`${pct}%`);
+    }
+    const color =
+      usage.ratio >= CONTEXT_COMPACT_HARD_RATIO
+        ? "#ff8f6c"
+        : usage.ratio >= CONTEXT_COMPACT_SOFT_RATIO
+          ? "#f0b45e"
+          : "#8a8f97";
+    this.contextMeterBtn.style.setProperty("--codex-context-ratio", `${pct}%`);
+    this.contextMeterBtn.style.setProperty("--codex-context-color", color);
+    this.contextMeterBtn.toggleClass("is-soft", usage.ratio >= CONTEXT_COMPACT_SOFT_RATIO);
+    this.contextMeterBtn.toggleClass("is-hard", usage.ratio >= CONTEXT_COMPACT_HARD_RATIO);
+    this.contextMeterBtn.title =
+      `Context window: ${pct}% full\n` +
+      `${usage.used.toLocaleString()} / ${usage.max.toLocaleString()} tokens used\n` +
+      `会在 >=${Math.round(CONTEXT_COMPACT_SOFT_RATIO * 100)}% 自动压缩，>=${Math.round(
+        CONTEXT_COMPACT_HARD_RATIO * 100
+      )}% 强制压缩`;
   }
 
   async addImageFiles(files) {
@@ -827,6 +898,7 @@ class CodexChatView extends ItemView {
       this.selectionMetaEl.removeClass("is-visible");
       this.syncContextChipsVisible();
     }
+    this.updateContextMeter();
   }
 
   syncContextChipsVisible() {
@@ -1193,6 +1265,7 @@ class CodexChatView extends ItemView {
     if (!this.selectedMentions.length) {
       this.mentionChipsEl.removeClass("is-visible");
       this.syncContextChipsVisible();
+      this.updateContextMeter();
       return;
     }
     this.mentionChipsEl.addClass("is-visible");
@@ -1224,6 +1297,7 @@ class CodexChatView extends ItemView {
     }
     this.syncContextChipsVisible();
     this.updateInputOverlayLayout();
+    this.updateContextMeter();
   }
 
   async loadAvailableSkills() {
@@ -1401,6 +1475,7 @@ class CodexChatView extends ItemView {
       this.skillChipsEl.removeClass("is-visible");
       this.updateSkillQuickButton();
       this.syncContextChipsVisible();
+      this.updateContextMeter();
       return;
     }
 
@@ -1431,6 +1506,7 @@ class CodexChatView extends ItemView {
     this.updateSkillQuickButton();
     this.syncContextChipsVisible();
     this.updateInputOverlayLayout();
+    this.updateContextMeter();
   }
 
   updateCurrentNoteLabel() {
@@ -1843,10 +1919,20 @@ class CodexChatView extends ItemView {
     }, 1000);
 
     try {
+      const autoCompactResult = await this.plugin.maybeAutoCompactSessionContext(session, userText);
+      session = getSessionRef();
+      if (!session) {
+        throw new Error("会话状态已失效，请重试");
+      }
+      if (autoCompactResult && autoCompactResult.performed) {
+        new Notice("上下文占用较高，已自动压缩历史上下文");
+      }
       const promptInput = [userText, imageNames.length ? `附图: ${imageNames.join(", ")}` : ""]
         .filter(Boolean)
         .join("\n");
       const prompt = await this.plugin.buildChatPrompt(promptInput, session);
+      this.plugin.markSessionPromptUsage(session, estimateTextTokens(prompt));
+      this.updateContextMeter();
       const onProgress = (event) => {
         if (!event || typeof event !== "object") {
           return;
@@ -2174,6 +2260,8 @@ module.exports = class CodexBridgePlugin extends Plugin {
           codexThreadId: "",
           draftMentions: [],
           draftSkills: [],
+          compactedContext: "",
+          lastPromptTokens: 0,
           autoDocMentionDisabled: false,
           autoDocMentionSeeded: false
         }
@@ -2310,6 +2398,8 @@ module.exports = class CodexBridgePlugin extends Plugin {
       codexThreadId: "",
       draftMentions: [],
       draftSkills: [],
+      compactedContext: "",
+      lastPromptTokens: 0,
       autoDocMentionDisabled: false,
       autoDocMentionSeeded: false
     };
@@ -2338,6 +2428,8 @@ module.exports = class CodexBridgePlugin extends Plugin {
           codexThreadId: "",
           draftMentions: [],
           draftSkills: [],
+          compactedContext: "",
+          lastPromptTokens: 0,
           autoDocMentionDisabled: false,
           autoDocMentionSeeded: false
         };
@@ -2381,6 +2473,8 @@ module.exports = class CodexBridgePlugin extends Plugin {
       codexThreadId: "",
       draftMentions: [],
       draftSkills: [],
+      compactedContext: "",
+      lastPromptTokens: 0,
       autoDocMentionDisabled: false,
       autoDocMentionSeeded: false
     };
@@ -2446,6 +2540,151 @@ module.exports = class CodexBridgePlugin extends Plugin {
     return this.settings.show1MContext ? CONTEXT_WINDOW_1M : CONTEXT_WINDOW_STANDARD;
   }
 
+  estimateContextUsage(session, options) {
+    const opts = options && typeof options === "object" ? options : {};
+    const max = this.getContextWindowBudget();
+    if (!session) {
+      return { used: 0, max, ratio: 0 };
+    }
+    const draftInput = String(opts.draftInput || "");
+    const mentions = Array.isArray(opts.mentions) ? opts.mentions : [];
+    const skills = Array.isArray(opts.skills) ? opts.skills : [];
+    const imageCount = Number.isFinite(opts.imageCount) ? Math.max(0, Number(opts.imageCount)) : 0;
+    let used = 0;
+
+    if (Array.isArray(session.messages)) {
+      const recentMessages = session.messages.slice(-Math.max(20, Math.floor(MAX_SESSION_MESSAGES * 0.7)));
+      for (const msg of recentMessages) {
+        if (!msg || typeof msg.content !== "string") {
+          continue;
+        }
+        used += estimateTextTokens(`${msg.role || "user"}\n${msg.content}`);
+      }
+    }
+    if (session.compactedContext && String(session.compactedContext).trim()) {
+      used += estimateTextTokens(String(session.compactedContext)) + 80;
+    }
+    if (this.settings.includeNoteContextInChat && this.lastMarkdownText) {
+      used += estimateTextTokens(clampText(this.lastMarkdownText, 4000));
+    }
+    if (this.lastSelectionText) {
+      used += estimateTextTokens(clampText(this.lastSelectionText, 2000));
+    }
+    if (mentions.length) {
+      for (const m of mentions) {
+        used += m && m.type === "folder" ? 1800 : 700;
+      }
+    }
+    if (skills.length) {
+      used += skills.length * 420;
+    }
+    if (imageCount > 0) {
+      used += imageCount * 1200;
+    }
+    if (draftInput) {
+      used += estimateTextTokens(draftInput);
+    }
+    if (Number.isFinite(session.lastPromptTokens) && session.lastPromptTokens > 0) {
+      used = Math.max(used, Math.floor(session.lastPromptTokens));
+    }
+    const ratio = max > 0 ? Math.max(0, Math.min(1.2, used / max)) : 0;
+    return { used, max, ratio };
+  }
+
+  markSessionPromptUsage(session, tokens) {
+    if (!session || !Number.isFinite(tokens) || tokens <= 0) {
+      return;
+    }
+    session.lastPromptTokens = Math.floor(tokens);
+    session.updatedAt = Date.now();
+    this.persist().catch(() => {});
+  }
+
+  async maybeAutoCompactSessionContext(session, draftInput) {
+    if (!session || session.contextCompacting) {
+      return { performed: false };
+    }
+    const usage = this.estimateContextUsage(session, { draftInput });
+    if (usage.ratio < CONTEXT_COMPACT_SOFT_RATIO) {
+      return { performed: false, usage };
+    }
+    return this.compactSessionContext(
+      session,
+      usage.ratio >= CONTEXT_COMPACT_HARD_RATIO ? "auto-hard" : "auto-soft"
+    );
+  }
+
+  async compactSessionContext(session, reason) {
+    if (!session || session.contextCompacting) {
+      return { performed: false };
+    }
+    const existingMessages = Array.isArray(session.messages) ? session.messages : [];
+    if (existingMessages.length <= CONTEXT_COMPACT_KEEP_RECENT_MESSAGES + 1) {
+      return { performed: false };
+    }
+    const toSummarize = existingMessages.slice(
+      0,
+      Math.max(0, existingMessages.length - CONTEXT_COMPACT_KEEP_RECENT_MESSAGES)
+    );
+    if (!toSummarize.length) {
+      return { performed: false };
+    }
+
+    session.contextCompacting = true;
+    try {
+      const transcript = toSummarize
+        .map((msg) => {
+          const role = msg && msg.role === "assistant" ? "助手" : "用户";
+          const content = msg && typeof msg.content === "string" ? msg.content.trim() : "";
+          return `${role}:\n${content}`;
+        })
+        .join("\n\n")
+        .slice(0, 90000);
+      const summaryPrompt = [
+        "请把下面这段多轮对话压缩为“可继续对话的上下文记忆”。",
+        "要求：",
+        "1) 用中文，简洁且信息完整。",
+        "2) 保留用户目标、约束、偏好、已完成事项、未完成事项、关键结论。",
+        "3) 输出 Markdown，使用小标题和要点列表。",
+        "4) 不要杜撰未出现的事实。",
+        "",
+        "对话内容：",
+        transcript
+      ].join("\n");
+      let summaryText = "";
+      try {
+        const result = await this.runCodex(summaryPrompt, null, null, []);
+        summaryText = String((result && result.text) || "").trim();
+      } catch (error) {
+        summaryText = "";
+      }
+      if (!summaryText) {
+        const fallback = toSummarize
+          .slice(-6)
+          .map((msg) => `${msg.role === "assistant" ? "助手" : "用户"}: ${String(msg.content || "").slice(0, 260)}`)
+          .join("\n");
+        summaryText = `## 历史上下文摘要（自动回退）\n${fallback}`.trim();
+      }
+
+      session.compactedContext = [String(session.compactedContext || "").trim(), summaryText]
+        .filter(Boolean)
+        .join("\n\n")
+        .slice(0, MAX_COMPACT_SUMMARY_CHARS);
+      session.messages = existingMessages.slice(-CONTEXT_COMPACT_KEEP_RECENT_MESSAGES);
+      session.messages.unshift({
+        role: "assistant",
+        content: `（上下文已压缩：${toSummarize.length} 条历史消息，原因：${reason || "manual"}）`
+      });
+      session.lastPromptTokens = 0;
+      session.updatedAt = Date.now();
+      trimSessionMessages(session);
+      await this.persist();
+      return { performed: true, summarizedCount: toSummarize.length };
+    } finally {
+      session.contextCompacting = false;
+    }
+  }
+
   isAgentMode() {
     return this.settings.agentMode !== false;
   }
@@ -2506,6 +2745,9 @@ module.exports = class CodexBridgePlugin extends Plugin {
       blocks.push("如果用户提到“上文/刚才/继续/用中文回答我”，默认指当前会话上一轮上下文，不要丢失话题。");
       if (compactHistory) {
         blocks.push(compactHistory);
+      }
+      if (session && session.compactedContext && String(session.compactedContext).trim()) {
+        blocks.push(`压缩后的长期会话记忆:\n${String(session.compactedContext).trim()}`);
       }
       if (selectedSkills.length) {
         blocks.push(formatSkillRefsForPrompt(selectedSkills));
@@ -2633,6 +2875,9 @@ module.exports = class CodexBridgePlugin extends Plugin {
     const contextBlocks = [];
     if (selectedSkills.length) {
       contextBlocks.push(formatSkillRefsForPrompt(selectedSkills));
+    }
+    if (session && session.compactedContext && String(session.compactedContext).trim()) {
+      contextBlocks.push(`压缩后的长期会话记忆:\n${String(session.compactedContext).trim()}`);
     }
     if (carryFromLastAssistant && lastAssistantOutput) {
       contextBlocks.push(`上轮助手结果（本轮可直接引用）:\n${lastAssistantOutput}`);
@@ -4168,6 +4413,15 @@ function clampText(text, maxLen) {
   return text.length > maxLen ? `${text.slice(0, maxLen)}\n...(truncated)` : text;
 }
 
+function estimateTextTokens(text) {
+  const raw = String(text || "");
+  if (!raw) {
+    return 0;
+  }
+  const bytes = Buffer.byteLength(raw, "utf8");
+  return Math.max(1, Math.ceil(bytes / 3));
+}
+
 function newId() {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -4221,6 +4475,8 @@ function normalizeSession(raw) {
     codexThreadId: typeof raw.codexThreadId === "string" ? raw.codexThreadId : "",
     draftMentions: normalizeMentionEntries(raw.draftMentions || []),
     draftSkills: normalizeSkillIds(raw.draftSkills || []),
+    compactedContext: clampText(typeof raw.compactedContext === "string" ? raw.compactedContext : "", MAX_COMPACT_SUMMARY_CHARS),
+    lastPromptTokens: Number.isFinite(raw.lastPromptTokens) ? Number(raw.lastPromptTokens) : 0,
     autoDocMentionDisabled: Boolean(raw.autoDocMentionDisabled),
     autoDocMentionSeeded: Boolean(raw.autoDocMentionSeeded)
   };

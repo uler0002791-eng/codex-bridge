@@ -374,6 +374,61 @@
   height: 13px;
 }
 
+.codex-bridge-context-meter {
+  --codex-context-ratio: 0%;
+  --codex-context-color: #8a8f97;
+  position: relative;
+  width: 27px;
+  height: 27px;
+  border: none;
+  border-radius: 999px;
+  padding: 0;
+  background:
+    conic-gradient(var(--codex-context-color) var(--codex-context-ratio), rgba(255, 255, 255, 0.14) 0);
+  color: rgba(240, 242, 245, 0.92);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.codex-bridge-context-meter::after {
+  content: "";
+  position: absolute;
+  inset: 3px;
+  border-radius: 999px;
+  background: rgba(25, 27, 32, 0.98);
+}
+
+.codex-bridge-context-meter-text {
+  position: relative;
+  z-index: 1;
+  font-size: 8px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0.01em;
+}
+
+.codex-bridge-context-meter.is-soft .codex-bridge-context-meter-text {
+  color: #ffd07b;
+}
+
+.codex-bridge-context-meter.is-hard .codex-bridge-context-meter-text {
+  color: #ffb09a;
+}
+
+.codex-bridge-context-meter.is-working {
+  animation: codex-context-spin 1.1s linear infinite;
+}
+
+@keyframes codex-context-spin {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
 .codex-bridge-history-wrap {
   position: relative;
 }
